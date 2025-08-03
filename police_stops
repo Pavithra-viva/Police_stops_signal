@@ -1,0 +1,30 @@
+import pandas as pd
+import numpy as np
+
+print("Libraries loaded successfully ✅")
+
+
+# Load the CSV file
+df = pd.read_csv("traffic_stops.csv")
+
+df = pd.read_csv("traffic_stops.csv", low_memory=False)
+
+df.head()
+
+import pandas as pd
+import numpy as np
+
+print ("libraries loaded sucessfully")
+# Load the CSV file
+df = pd.read_csv("traffic_stops.csv", low_memory=False)
+
+# Display the first few rows of the DataFrame
+df.head()
+
+#drop columns with all NaN values
+df = df.dropna(axis=1, how='all' , inplace=True)
+
+#optionally fill or drop remaining NaN values
+df = df.fillna('Unknown', inplace=True)
+
+
