@@ -1,300 +1,150 @@
-import datetime
 import streamlit as st
 import pandas as pd
-import altair as alt
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
+import matplotlib.pyplot as plt
 
-# --- DB connection ---
-user = "postgres"
-password = "Python123456789"
-host = "localhost"
-database = "traffic_signal"
-db_url = f"postgresql://{user}:{password}@{host}/{database}"
-engine = create_engine(db_url)
+engine = create_engine("postgresql://postgres:Python123456789@localhost:5432/traffic_logs")
 
-# --- Helpers ---
-def run_query(query):
-    return pd.read_sql(query, engine)
+@st.cache_data
+def load_data():
+    return pd.read_sql("SELECT * FROM police_traffic_logs", engine)
 
-def ensure_columns_and_backfill():
-    with engine.begin() as conn:
-        # Ensure 'drug_related'
-        result = conn.execute(text("""
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_name = 'vehicle_stops'
-              AND column_name = 'drug_related';
-        """))
-        if not result.fetchone():
-            conn.execute(text("ALTER TABLE vehicle_stops ADD COLUMN drug_related BOOLEAN;"))
-        conn.execute(text("""
-            UPDATE vehicle_stops
-            SET drug_related = TRUE
-            WHERE violation_raw ILIKE '%drug%';
-        """))
+df = load_data()
 
-        # Ensure 'stop_datetime'
-        conn.execute(text("""
-            ALTER TABLE vehicle_stops
-            ADD COLUMN IF NOT EXISTS stop_datetime TIMESTAMP;
-        """))
+st.title("🚓 SecureCheck Police Dashboard")
+st.markdown("---")
 
-        # Ensure 'location' column exists
-        conn.execute(text("""
-            ALTER TABLE vehicle_stops
-            ADD COLUMN IF NOT EXISTS location TEXT;
-        """))
+st.subheader("📌 Latest 10 Traffic Stops")
+st.dataframe(df.sort_values(by=["stop_date", "stop_time"], ascending=False).head(10))
+st.markdown("---")
 
-        # Ensure 'country' column exists
-        conn.execute(text("""
-            ALTER TABLE vehicle_stops
-            ADD COLUMN IF NOT EXISTS country TEXT;
-        """))
+st.subheader("🔍 Filters")
 
-        # Fill missing locations
-        conn.execute(text("""
-            UPDATE vehicle_stops
-            SET location = 'Unknown'
-            WHERE location IS NULL OR location = '';
-        """))
+country_list = ["All"] + sorted(df["country_name"].dropna().unique().tolist())
+country = st.selectbox("Select Country", country_list)
 
-        # Fill missing country from location
-        conn.execute(text("""
-            UPDATE vehicle_stops
-            SET country = 'India'
-            WHERE country IS NULL AND location ILIKE '%Chennai%';
-        """))
+if country == "All":
+    violation_list = ["All"] + sorted(df["violation"].dropna().unique().tolist())
+else:
+    violation_list = ["All"] + sorted(df[df["country_name"] == country]["violation"].dropna().unique().tolist())
 
-        # Identify date-like column
-        date_column = None
-        for candidate in ["date", "stop_date", "incident_date", "date_of_incident"]:
-            chk = conn.execute(text(f"""
-                SELECT 1 FROM information_schema.columns
-                WHERE table_name = 'vehicle_stops' AND column_name = '{candidate}';
-            """))
-            if chk.fetchone():
-                date_column = candidate
-                break
+violation = st.selectbox("Select Violation", violation_list)
 
-        # Check stop_time column
-        has_stop_time = conn.execute(text("""
-            SELECT 1 FROM information_schema.columns
-            WHERE table_name = 'vehicle_stops' AND column_name = 'stop_time';
-        """)).fetchone() is not None
+filtered_df = df.copy()
 
-        # Backfill stop_datetime
-        if date_column and has_stop_time:
-            conn.execute(text(f"""
-                UPDATE vehicle_stops
-                SET stop_datetime = (({date_column}::text)::date + stop_time::time)
-                WHERE stop_datetime IS NULL
-                  AND stop_time IS NOT NULL
-                  AND {date_column} IS NOT NULL;
-            """))
-        if date_column:
-            conn.execute(text(f"""
-                UPDATE vehicle_stops
-                SET stop_datetime = (({date_column}::text)::date)::timestamp
-                WHERE stop_datetime IS NULL
-                  AND {date_column} IS NOT NULL;
-            """))
-        if has_stop_time and not date_column:
-            conn.execute(text("""
-                UPDATE vehicle_stops
-                SET stop_datetime = (CURRENT_DATE + stop_time::time)
-                WHERE stop_datetime IS NULL
-                  AND stop_time IS NOT NULL;
-            """))
+if country != "All":
+    filtered_df = filtered_df[filtered_df["country_name"] == country]
 
-# --- Page Title ---
-st.title("Vehicle Stops Dashboard")
+if violation != "All":
+    filtered_df = filtered_df[filtered_df["violation"] == violation]
 
-# Run schema setup once
-if "schema_initialized" not in st.session_state:
-    ensure_columns_and_backfill()
-    st.session_state.schema_initialized = True
-    st.success("'drug_related', 'stop_datetime', 'location', and 'country' ensured/backfilled.")
+st.subheader("📋 Filtered Traffic Stops")
+st.dataframe(filtered_df)
+st.markdown("---")
 
-# --- Show preview ---
-st.dataframe(run_query("SELECT * FROM vehicle_stops LIMIT 5;"))
+st.subheader("📊 Summary Metrics")
 
-# --- Log Submission Form ---
-st.title("🚓 Add New Police Log")
-with st.form("log_form"):
-    officer_name = st.text_input("Officer Name")
-    incident_type = st.selectbox("Incident Type", ["Accident", "Probable Cause", "Investigation", "Violation", "Other"])
-    driver_name = st.text_input("Driver Name")
-    vehicle_type = st.selectbox("Vehicle Type", ["Car", "Bike", "Truck", "Other"])
-    location = st.text_input("Location")
-    date = st.date_input("Date of Incident")
-    violation = st.text_input("Violation Type")
-    submit = st.form_submit_button("Submit Log")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Total Stops", len(filtered_df))
+c2.metric("Total Arrests", int(filtered_df["is_arrested"].sum()))
+c3.metric("Searches Conducted", int(filtered_df["search_conducted"].sum()))
+c4.metric("Drug-Related Stops", int(filtered_df["drugs_related_stop"].sum()))
+st.markdown("---")
+
+st.subheader("📈 Violation Counts")
+
+if len(filtered_df) > 0:
+    vc = filtered_df["violation"].value_counts().reset_index()
+    vc.columns = ["Violation", "Count"]
+    st.bar_chart(vc.set_index("Violation"))
+else:
+    st.info("No data available")
+
+st.markdown("---")
+
+st.subheader("🧑 Driver Gender Distribution")
+
+if filtered_df["driver_gender"].nunique() > 0:
+    fig, ax = plt.subplots()
+    filtered_df["driver_gender"].value_counts().plot.pie(autopct="%1.1f%%", ax=ax, ylabel="")
+    st.pyplot(fig)
+else:
+    st.info("No data available")
+
+st.markdown("---")
+
+st.subheader("📝 Add New Police Log")
+
+with st.form("police_log_form"):
+    stop_date = st.date_input("Stop Date")
+    stop_time = st.time_input("Stop Time")
+    country_name = st.selectbox("Country", sorted(df["country_name"].dropna().unique()))
+    driver_gender = st.selectbox("Driver Gender", ["Male", "Female"])
+    driver_age = st.number_input("Driver Age", min_value=16, max_value=100)
+    driver_race = st.selectbox("Driver Race", sorted(df["driver_race"].dropna().unique()))
+    violation = st.selectbox("Violation", sorted(df["violation"].dropna().unique()))
+    search_conducted = st.selectbox("Search Conducted", [True, False])
+    search_type = st.selectbox("Search Type", sorted(df["search_type"].dropna().unique()))
+    is_arrested = st.selectbox("Arrested", [True, False])
+    stop_duration = st.selectbox("Stop Duration", sorted(df["stop_duration"].dropna().unique()))
+    drugs_related_stop = st.selectbox("Drug Related", [True, False])
+    vehicle_number = st.text_input("Vehicle Number")
+    submit = st.form_submit_button("Add Log")
 
 if submit:
-    insert_query = text("""
-        INSERT INTO vehicle_stops (officer_name, incident_type, driver_name, vehicle_type, location, date, violation_raw)
-        VALUES (:officer_name, :incident_type, :driver_name, :vehicle_type, :location, :date, :violation_raw);
-    """)
-    with engine.begin() as conn:
-        conn.execute(insert_query, {
-            "officer_name": officer_name,
-            "incident_type": incident_type,
-            "driver_name": driver_name,
-            "vehicle_type": vehicle_type,
-            "location": location,
-            "date": date,
-            "violation_raw": violation
-        })
-    st.success("✅ New Police Log Submitted to Database")
+    insert_df = pd.DataFrame([{
+        "stop_date": stop_date,
+        "stop_time": stop_time,
+        "country_name": country_name,
+        "driver_gender": driver_gender,
+        "driver_age": driver_age,
+        "driver_race": driver_race,
+        "violation": violation,
+        "search_conducted": search_conducted,
+        "search_type": search_type,
+        "is_arrested": is_arrested,
+        "stop_duration": stop_duration,
+        "drugs_related_stop": drugs_related_stop,
+        "vehicle_number": vehicle_number
+    }])
+    insert_df.to_sql("police_traffic_logs", engine, if_exists="append", index=False)
+    st.success("Police log added successfully")
+    st.cache_data.clear()
 
-# --- Advanced Insights ---
 st.markdown("---")
-st.header("🌟 Advanced Insights")
 
-if "selected_insight" not in st.session_state:
-    st.session_state.selected_insight = "Top 5 Violations"
+st.subheader("🌟 Advanced Insights")
 
-with st.expander("🚗 Vehicle-Based"):
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Top 10 Drug-Related Vehicles"):
-            st.session_state.selected_insight = "Top 10 Drug-Related Vehicles"
-    with col2:
-        if st.button("Most Frequently Searched Vehicles"):
-            st.session_state.selected_insight = "Most Frequently Searched Vehicles"
-
-with st.expander("🧍 Demographic-Based", expanded=True):
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.button("Highest Arrest Rate by Age Group"):
-            st.session_state.selected_insight = "Highest Arrest Rate by Age Group"
-    with col2:
-        if st.button("Gender Distribution by Country"):
-            st.session_state.selected_insight = "Gender Distribution by Country"
-    with col3:
-        if st.button("Highest Search Rate by Race & Gender"):
-            st.session_state.selected_insight = "Highest Search Rate by Race & Gender"
-
-with st.expander("🕒 Time & Duration Based", expanded=True):
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.button("Peak Traffic Stop Times"):
-            st.session_state.selected_insight = "Peak Traffic Stop Times"
-    with col2:
-        if st.button("Average Stop Duration per Violation"):
-            st.session_state.selected_insight = "Average Stop Duration per Violation"
-    with col3:
-        if st.button("Night Arrest Likelihood"):
-            st.session_state.selected_insight = "Night Arrest Likelihood"
-
-with st.expander("⚖️ Violation-Based"):
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.button("Top 5 Violations"):
-            st.session_state.selected_insight = "Top 5 Violations"
-    with col2:
-        if st.button("Violations by Drivers <25"):
-            st.session_state.selected_insight = "Violations by Young Drivers"
-    with col3:
-        if st.button("Rarely Arrested/Search Violations"):
-            st.session_state.selected_insight = "Rare Search/Arrest Violations"
-
-with st.expander("🌍 Location-Based"):
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.button("Countries with Most Drug Stops"):
-            st.session_state.selected_insight = "Countries with Most Drug Stops"
-    with col2:
-        if st.button("Arrest Rate by Country & Violation"):
-            st.session_state.selected_insight = "Arrest Rate by Country & Violation"
-    with col3:
-        if st.button("Searches by Country"):
-            st.session_state.selected_insight = "Searches by Country"
-
-# --- Insights Logic ---
-selected_insight = st.session_state.selected_insight
-
-if selected_insight == "Top 5 Violations":
-    query = """
-    SELECT violation_raw AS label, COUNT(*) AS value
-    FROM vehicle_stops
-    GROUP BY violation_raw
-    ORDER BY value DESC
-    LIMIT 5;
+queries = {
+    "Top 5 Violations": """
+        SELECT violation, COUNT(*) AS count
+        FROM police_traffic_logs
+        GROUP BY violation
+        ORDER BY count DESC
+        LIMIT 5;
+    """,
+    "Top 5 Search Types": """
+        SELECT search_type, COUNT(*) AS count
+        FROM police_traffic_logs
+        GROUP BY search_type
+        ORDER BY count DESC
+        LIMIT 5;
+    """,
+    "Night Stops Arrest Rate": """
+        SELECT
+            CASE
+                WHEN stop_time BETWEEN '18:00' AND '23:59' OR stop_time BETWEEN '00:00' AND '05:59'
+                THEN 'Night'
+                ELSE 'Day'
+            END AS time_period,
+            ROUND(AVG(CASE WHEN is_arrested THEN 1 ELSE 0 END)*100,2) AS arrest_rate
+        FROM police_traffic_logs
+        GROUP BY time_period;
     """
-    df = run_query(query)
-    st.subheader("🔍 Top 5 Violations")
-    st.dataframe(df)
-    st.bar_chart(df.set_index("label"))
+}
 
-elif selected_insight == "Top 10 Drug-Related Vehicles":
-    query = """
-    SELECT vehicle_number AS label, COUNT(*) AS value
-    FROM vehicle_stops
-    WHERE drug_related = TRUE
-    GROUP BY vehicle_number
-    ORDER BY value DESC
-    LIMIT 10;
-    """
-    df = run_query(query)
-    st.subheader("💊 Top 10 Drug-Related Vehicles")
-    st.dataframe(df)
-    st.bar_chart(df.set_index("label"))
+choice = st.selectbox("Select Analysis", list(queries.keys()))
 
-elif selected_insight == "Most Frequently Searched Vehicles":
-    query = """
-    SELECT vehicle_number AS label, COUNT(*) AS value
-    FROM vehicle_stops
-    WHERE search_conducted = TRUE
-    GROUP BY vehicle_number
-    ORDER BY value DESC
-    LIMIT 10;
-    """
-    df = run_query(query)
-    st.subheader("🔍 Most Frequently Searched Vehicles")
-    st.dataframe(df)
-    st.bar_chart(df.set_index("label"))
-
-elif selected_insight == "Peak Traffic Stop Times":
-    query = """
-    SELECT
-        EXTRACT(HOUR FROM stop_datetime) AS hour_of_day,
-        COUNT(*) AS stop_count
-    FROM vehicle_stops
-    WHERE stop_datetime IS NOT NULL
-    GROUP BY hour_of_day
-    ORDER BY hour_of_day;
-    """
-    df = run_query(query)
-    st.subheader("⏰ Peak Traffic Stop Times")
-
-    if df.empty:
-        st.warning("No stop datetime data available to compute peak times.")
-    else:
-        df["hour_of_day"] = df["hour_of_day"].astype(int)
-        st.dataframe(df)
-        chart = alt.Chart(df).mark_bar().encode(
-            x=alt.X("hour_of_day:O", title="Hour of Day (0-23)"),
-            y=alt.Y("stop_count:Q", title="Number of Stops"),
-            tooltip=["hour_of_day", "stop_count"]
-        ).properties(title="Traffic Stops by Hour")
-        st.altair_chart(chart, use_container_width=True)
-        peak = df.nlargest(3, "stop_count")
-        top_hours = ", ".join(f"{int(h)}:00" for h in peak["hour_of_day"])
-        st.markdown(f"**Top peak hours:** {top_hours}")
-
-elif selected_insight == "Countries with Most Drug Stops":
-    query = """
-    SELECT COALESCE(country, location, 'Unknown') AS label, COUNT(*) AS value
-    FROM vehicle_stops
-    WHERE drug_related = TRUE
-    GROUP BY COALESCE(country, location, 'Unknown')
-    ORDER BY value DESC;
-    """
-    df = run_query(query)
-    st.subheader("🌍 Countries (Locations) with Most Drug Stops")
-    if df.empty:
-        st.warning("No drug-related stop data found.")
-    else:
-        st.dataframe(df)
-        st.bar_chart(df.set_index("label"))
+if st.button("Run Analysis"):
+    result = pd.read_sql(queries[choice], engine)
+    st.dataframe(result)
